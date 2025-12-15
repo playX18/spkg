@@ -1,13 +1,13 @@
 (lockfile
   (version 2)
   (root-checksum
-    "375c7defebeea016070070f5a28fbb6c653217360e543cc2b815b4a8d4192072")
+    "08374eed9814b2120a4a93d8a728c8db9cf75fd0cd032d4360bdfb056fc786f9")
   (git (name args)
        (url "https://github.com/playx18/scm-args")
        (rev #f)
        (checksum
-         "a52c3a5372c0c4dfc5ca2f743be42bfc9076d848")
+         "7c11d164c5e07a555802ee62bb4571100465517a")
        (subpath "src/")
        (source
-         "args-a52c3a5372c0c4dfc5ca2f743be42bfc9076d848")))
+         "args-7c11d164c5e07a555802ee62bb4571100465517a")))
 

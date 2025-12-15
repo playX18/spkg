@@ -46,19 +46,18 @@
   (system* (string-append "cp -R " (shell-quote src) " " (shell-quote dst))))
 
 (define (capture-required-line cmd)
-  (let* ((proc (process cmd))
-         (stdout (list-ref proc 0))
-         (stdin (list-ref proc 1))
-         (pid (list-ref proc 2)))
-    (close-output-port stdin)
-    (let ((status (process-wait pid))
-          (line (read-line stdout)))
-      (close-input-port stdout)
+  (flush-output-port)
+  (call-with-process-io 
+    cmd 
+    (lambda (pid stdout stdin stderr)
+      (define status (process-wait pid))
+      (define line (read-line stdout))
+      (close-output-port stdin)
       (unless (zero? status)
         (error "Command failed" cmd status))
       (if (or (eof-object? line) (string=? line ""))
-          (error "Command produced no output" cmd)
-          line))))
+        (error "Command produced no output" cmd)
+        line ))))
 
 (define filesystem-checksum-script
   "import hashlib, os, sys\npath = os.path.abspath(sys.argv[1])\nexcludes = set(os.path.normpath(p) for p in sys.argv[2:])\nif not os.path.exists(path):\n    raise SystemExit('missing path: %s' % path)\nh = hashlib.sha256()\n\ndef feed_file(target):\n    with open(target, 'rb') as fh:\n        while True:\n            chunk = fh.read(131072)\n            if not chunk:\n                break\n            h.update(chunk)\nif os.path.isfile(path):\n    relname = os.path.basename(path)\n    if relname not in excludes:\n        feed_file(path)\nelse:\n    for root, dirs, files in os.walk(path):\n        dirs[:] = [d for d in dirs if d != '.git' and os.path.relpath(os.path.join(root, d), path) not in excludes]\n        dirs.sort()\n        files.sort()\n        rel = os.path.relpath(root, path)\n        if rel in excludes:\n            continue\n        h.update(rel.encode())\n        for name in files:\n            fp = os.path.join(root, name)\n            relpath = os.path.relpath(fp, path)\n            if relpath in excludes:\n                continue\n            h.update(relpath.encode())\n            feed_file(fp)\nprint(h.hexdigest())\n")
