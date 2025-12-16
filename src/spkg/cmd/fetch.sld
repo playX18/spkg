@@ -10,6 +10,8 @@
   (export spkg-fetch-command)
   (begin
     (define (run-fetch command)
+      (unless (file-exists? "spkg.scm")
+        (raise-manifest-error "No spkg.scm manifest found in the current directory."))
       (define m (read-manifest "spkg.scm"))
       (define ops (manifest-install-dependencies m #t))
 

@@ -1,7 +1,7 @@
 (lockfile
   (version 2)
   (root-checksum
-    "005d171fb347bd29b1b4481ca48721fb6e57a2487cf675d4d2409a83f226b1d7")
+    "76d7b8c377aeda317f385b379a6f8c7c4ec437345605b7ab077211367f9837ac")
   (oci (name (args))
        (raw? #f)
        (url "ghcr.io/playx18/args")

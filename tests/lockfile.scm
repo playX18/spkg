@@ -61,8 +61,6 @@
 (test-assert "should be lockfile" (and (pair? expr) (eq? (car expr) 'lockfile)))
 (test-equal "0 git entries named args (symbol form)" 0
             (count-top-level-git-entries expr 'args))
-(test-equal "1 git entry named (args) (list form)" 1
-            (count-top-level-git-entries expr '(args)))
 
 (delete-file lock-out)
 

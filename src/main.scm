@@ -42,7 +42,6 @@
           (else
             (print-condition-to-errlog c)
             (exit 1)))
-    (unless (file-exists? "spkg.scm")
-      (raise-manifest-error "No spkg.scm manifest found in the current directory."))
+    
     (command-runner-run runner args)))
 (main (command-line))

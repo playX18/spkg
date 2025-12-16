@@ -27,6 +27,8 @@
     
 
     (define (run-publish command)
+      (unless (file-exists? "spkg.scm")
+        (raise-manifest-error "No spkg.scm manifest found in the current directory."))
       (define option (argument-results-options (command-results command)))
       (define ref (option "ref"))
       (unless (and ref (string? ref) (not (string=? ref "")))

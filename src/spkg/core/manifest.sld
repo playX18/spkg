@@ -222,7 +222,7 @@
       name libraries rnrs version authors description documentation license homepage readme repository)
 
       (unless version
-        (warn "Package " "No version specified in package manifest. You would not be able to publish this package without a version."))
+        (warn "Warning " "No version specified in package manifest. You would not be able to publish this package without a version."))
 
       (when (symbol? name)
         (set! name (list name)))

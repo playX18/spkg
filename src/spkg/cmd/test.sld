@@ -75,6 +75,8 @@
       (system cmd))
 
     (define (run-test command)
+      (unless (file-exists? "spkg.scm")
+        (raise-manifest-error "No spkg.scm manifest found in the current directory."))
       (define results (command-results command))
       (define top-results (command-global-results command))
       (define top-flags (argument-results-flags top-results))

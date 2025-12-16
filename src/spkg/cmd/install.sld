@@ -40,6 +40,8 @@
       'value-help: "NAME")
     
     (define (run-install command)
+      (unless (file-exists? "spkg.scm")
+        (raise-manifest-error "No spkg.scm manifest found in the current directory."))
       (define option (argument-results-options (command-results command)))
       (define dir (option "directory"))
 
