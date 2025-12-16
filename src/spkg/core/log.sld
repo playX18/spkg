@@ -49,7 +49,8 @@
 
     (define (logln level process-head head fmt . args)
       (apply log level process-head head fmt args)
-      (newline (current-error-port)))
+      (when (>= (log-level) level)
+        (newline (current-error-port))))
 
     (define (log level process-head head fmt . args)
       (when (>= (log-level) level)

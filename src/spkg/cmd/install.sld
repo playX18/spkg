@@ -81,7 +81,7 @@
             (string-append 
               (implementation->binary-name (current-implementation)) 
               " " 
-              (string-join (ops->runargs ops install-src-dir) " ") 
+              (string-join (ops->runargs ops install-src-dir #t) " ") 
               " "
               (string-join (path->scriptarg (string-append install-src-dir "/main.scm") install-src-dir) " ")
               " -- $@")

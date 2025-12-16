@@ -68,10 +68,9 @@
         (string-append
           impl
           " "
-          (string-join (ops->runargs ops project-src-dir) " ")
+          (string-join (ops->runargs ops  project-src-dir #f) " ")
           " "
           (string-join (path->scriptarg file project-src-dir) " ")))
-      (verbose "DEBUG" " Executing test command: '~a'" cmd)
       (system cmd))
 
     (define (run-test command)

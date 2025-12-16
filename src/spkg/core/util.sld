@@ -55,6 +55,7 @@
           (define line (read-line stdout))
           (close-output-port stdin)
           (unless (zero? status)
+            (system* cmd)
             (error "Command failed" cmd status))
           (if (or (eof-object? line) (string=? line ""))
               (error "Command produced no output" cmd)
@@ -73,7 +74,6 @@
         (string-append "python3 -c \"" filesystem-checksum-script "\" "
                        (shell-quote path)
                        exclude-args)))
-    
-    
+
   )
 )

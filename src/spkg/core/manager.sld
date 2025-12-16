@@ -18,8 +18,10 @@
     manifest-install-dependencies
     manifest-needs-recompile?
     manifest-update-dependencies
+    
     implementation->binary-name
     current-implementation
     ops->runargs
-    path->scriptarg)
+    path->scriptarg
+    system-has-library?)
   (include "manager.scm"))

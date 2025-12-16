@@ -204,9 +204,11 @@
   (or (not stored) (not (string=? stored current))))
 
 (define (force-runops-recompile ops)
-  (runops (runops-append-path ops)
+  (define new (runops (runops-append-path ops)
           (runops-prepend-path ops)
           #t))
+  (verbose "DEBUG " "forced recompile in runops=~a" (runops-recompile? new))
+  new)
 
 (define (lockfile-set-root-checksum! lock manifest)
   (lockfile-root-checksum-set! lock (manifest-root-checksum manifest)))
@@ -222,7 +224,9 @@
     (info "Build" " Root directory modified, forcing recompilation."))
   (lockfile-set-root-checksum! lock manifest)
   (save-lockfile! lock)
+  
   final-ops)
+
 
 (define (manifest-needs-recompile? manifest)
   (define lock (load-lockfile (manifest-lockfile-path manifest)))
@@ -375,23 +379,22 @@
 
 
 ;; Convert runops to command line arguments for specific Scheme implementation
-(define (ops->runargs ops for-install?)
+(define (ops->runargs ops src-dir for-install?)
   (define impl (current-implementation))
 
   (case impl 
     ((capyscheme)
       ;; install will force recompilation anyways
-     
       (let ((recompile? (and (not for-install?) (runops-recompile? ops)))
             (append-paths (runops-append-path ops))
             (prepend-paths  
-              (if for-install? 
-                (cons for-install? (runops-prepend-path ops))
-                (runops-prepend-path ops))))
+              (if (zero? (string-length src-dir))
+                  (runops-prepend-path ops)
+                  (cons src-dir (runops-prepend-path ops)))))
         
         `(
-          "--load-path" ,(string-join prepend-paths ",")
-          ,@(if (not (null? append-paths)) `("--append-load-path" ,(string-join append-paths ",")) ())
+          ,@(if (not (null? prepend-paths)) `("--load-path" ,(string-join prepend-paths ",")) '())
+          ,@(if (not (null? append-paths)) `("--append-load-path" ,(string-join append-paths ",")) '())
           ,(if recompile? "--fresh-auto-compile" ""))))
     (else 
       (error "Not yet supported Scheme implementation" impl))))
@@ -405,3 +408,28 @@
       `("--script" ,path))
     (else 
       (error "Not yet supported Scheme implementation" impl))))
+
+
+
+;; Given a library name check if current-implementation has it installed.
+(define (system-has-library? lib)
+  (define libname (string-append "(quote (" (string-join (map symbol->string lib) " ") "))"))
+  (case (current-implementation)
+    ((capyscheme)
+      (let ((cmd 
+        (string-append 
+          (implementation->binary-name (current-implementation))
+          " -c "
+          "'(if (resolve-r6rs-interface " libname ") (exit 0) (exit 1))'")))
+    
+        (call-with-process-io 
+          cmd 
+          (lambda (pid stdout stdin stderr)
+            (define status (process-wait pid))
+            (close-output-port stdin)
+            (close-input-port stdout)
+            (zero? status)))
+          
+        
+        
+        ))))
