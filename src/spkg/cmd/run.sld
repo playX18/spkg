@@ -45,8 +45,7 @@
                 " "
                 (string-join (ops->runargs ops src-dir #f m) " ")
                 " "
-                (string-join (path->scriptarg main-script src-dir) " ")
-                (if (null? rest) "" (string-append " -- " (string-join rest " "))))))
+                (string-join (path->scriptarg main-script src-dir rest) " "))))
         (verboseln "DEBUG" " Executing command: '~a'" cmd)
         (system 
           cmd)))

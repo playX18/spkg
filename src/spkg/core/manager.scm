@@ -20,7 +20,7 @@
     ((or (string=? lname "mit")
          (string=? lname "mitscheme")
          (string=? lname "mit-scheme"))
-     'mit-scheme)
+     'mitscheme)
     ((or (string=? lname "racket"))
      'racket)
     ((or (string=? lname "gauche"))
@@ -59,7 +59,7 @@
     ((chibischeme) "chibi-scheme")
     ((gambit) "gambit")
     ((guile) "guile")
-    ((mit-scheme) "mit-scheme")
+    ((mitscheme) "mit-scheme")
     ((racket) "racket")
     ((gauche) "gosh")
     ((scheme48) "s48")
@@ -453,22 +453,30 @@
           ,@(map (lambda (p) (string-append "-I" p)) prepend-paths)
           ,@(map (lambda (p) (string-append "-A" p)) append-paths)
           ))
+    ((mitscheme)
+      `(
+        "--batch-mode"
+        "--no-init-file"
+        ,@(map (lambda (p) (string-append "--load " p)) prepend-paths)
+        ,@(map (lambda (p) (string-append "--load " p)) append-paths)))
     (else 
       (error "Not yet supported Scheme implementation" impl))))
 
 
 ;; Convert package to a command-line argument list for running it as a program
-(define (path->scriptarg path for-install?)
+(define (path->scriptarg path for-install? rest)
   (define impl (current-implementation))
   (case impl 
     ((capyscheme)
-      `("--script" ,path))
+      `("--script" ,path "--" ,@rest))
     ((guile)
-      `("-s" ,path))
+      `("-s" ,path "--" ,@rest))
     ((chibischeme)
-      `(,path))
+      `(,path "--" ,@rest))
     ((gauche)
-      `(,path))
+      `(,path "--" ,@rest))
+    ((mitscheme)
+      `("--load" ,path "--eval" "'(exit 0)'" "--" ,@rest))
     (else 
       (error "Not yet supported Scheme implementation" impl))))
 
@@ -506,7 +514,7 @@
                         (string-append 
                           (implementation->binary-name (current-implementation))
                           " "
-                          (string-join (path->scriptarg file #f) " ")))))
+                          (string-join (path->scriptarg file #f '()) " ")))))
             (verboseln "DEBUG " "Library check output: ~a" line)
             (string=? line "FOUND")))))))
 

@@ -84,8 +84,7 @@
               " " 
               (string-join (ops->runargs ops install-src-dir #t m) " ") 
               " "
-              (string-join (path->scriptarg (string-append install-src-dir "/main.scm") install-src-dir) " ")
-              " -- $@")
+              (string-join (path->scriptarg (string-append install-src-dir "/main.scm") install-src-dir '("$@")) " "))
             out)
           (newline out)
           (flush-output-port out)))

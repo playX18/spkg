@@ -70,7 +70,7 @@
           " "
           (string-join (ops->runargs ops  project-src-dir #f manifest) " ")
           " "
-          (string-join (path->scriptarg file project-src-dir) " ")))
+          (string-join (path->scriptarg file project-src-dir) " " '())))
       (system cmd))
 
     (define (run-test command)
