@@ -13,7 +13,6 @@
     (scheme read)
     (scheme process-context))
 
-  (oci 
+  (git
     (name (args))
-    (url "ghcr.io/playx18/args")
-    (rev "0.1.1")))
+    (url "https://github.com/playx18/scm-args")))

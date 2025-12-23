@@ -2,7 +2,9 @@
   (import (scheme base))
   (cond-expand 
     (capy
-      (import (spkg core capy-primitives))))
+      (import (spkg core capy-primitives)))
+    (guile 
+      (import (spkg core guile-primitives))))
   (export  
     ; (pretty-print obj) -> void
     pretty-print 
