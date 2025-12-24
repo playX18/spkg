@@ -37,6 +37,12 @@
 (command-runner-add-command! runner spkg-test-command)
 (command-runner-add-command! runner spkg-publish-command)
 
+
 (define (main args)
-  (command-runner-run runner args))
+  (guard (c
+          (else
+            (print-condition-to-errlog c)
+            (exit 1)))
+    
+    (command-runner-run runner args)))
 (main (cdr (command-line)))
