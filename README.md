@@ -86,7 +86,7 @@ If you already have either **CapyScheme** (`capy`) or **Gauche** (`gosh`) instal
 included installer script. It auto-detects available Scheme runners and will ask which one to use.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/scheme-packages/spkg/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/scheme-packages/spkg/refs/heads/master/install.sh | sh
 ```
 
 Common options:
