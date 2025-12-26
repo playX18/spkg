@@ -7,8 +7,7 @@
     (spkg core dependency)
     (spkg core log)
     (spkg core compat)
-    (scheme read)
-    (scheme eval))
+    (scheme read))
   (export 
     package
     manifest
@@ -105,10 +104,9 @@
               (cond 
                 ((eof-object? expr) (reverse exprs))
                 (else (loop (read in) (cons expr exprs))))))
-          
+
           (let* ((exprs (read-all))
-              (m (eval `(manifest ,@exprs) (environment '(scheme base) '(spkg core manifest)))))
-                 
+                 (m (parse-manifest-exprs exprs)))
             (manifest-path-set! m canonical)
             (manifest-verify m)
             m))))
@@ -183,45 +181,225 @@
           "."
           dirn))
 
-    ;; macros to parse spkg manifest files
-    ;; 
-    ;; Manifests are just regular Scheme files
-    ;; that we read, and `eval` to get the package. 
-    ;; User cannot construct package and manifest
-    ;; in "raw" way, but only via these macros.
+    (define (ensure-list expr who)
+      (unless (list? expr)
+        (error who "must be a list" expr))
+      expr)
 
-    ;; "main" macro which wraps the source file
-    (define-syntax manifest 
-      (syntax-rules ()
-        ((_ expr ...)
-          (manifest-aux (#f '() '()) expr ...))))
+    (define (ensure-pair expr who)
+      (unless (pair? expr)
+        (error who "must be a non-empty list" expr))
+      expr)
 
-    (define-syntax manifest-aux
-      (syntax-rules (package dependencies dev-dependencies)
-        ((_ (%package %dependencies %dev-dependencies))
-          (make-manifest 
-            %package
-            %dependencies
-            %dev-dependencies))
-        ((_ (%package %dependencies %dev-dependencies) (dependencies dep ...) rest ...)
-          (manifest-aux 
-            (%package
-             (dependencies-aux () dep ...)
-             %dev-dependencies)
-             rest ...
-            ))
-        ((_ (%package %dependencies %dev-dependencies) (dev-dependencies dep ...) rest ...)
-          (manifest-aux
-            (%package
-             %dependencies
-             (dependencies-aux () dep ...))
-            rest ...))
-        ((_ (%package %dependencies %dev-dependencies) (package expr ...) rest ...)
-          (manifest-aux 
-            ((package expr ...)
-             %dependencies
-             %dev-dependencies)
-            rest ...))))
+    (define (parse-key-value-clause clause who)
+      (ensure-list clause who)
+      (ensure-pair clause who)
+      (let ((k (car clause))
+            (rest (cdr clause)))
+        (unless (symbol? k)
+          (error who "clause key must be a symbol" clause))
+        (values k rest)))
+
+    (define (parse-single clause who)
+      (call-with-values
+        (lambda () (parse-key-value-clause clause who))
+        (lambda (k rest)
+          (unless (and (pair? rest) (null? (cdr rest)))
+            (error who "clause must have exactly one value" clause))
+          (values k (car rest)))))
+
+    (define (normalize-name name who)
+      (cond
+        ((symbol? name) (list name))
+        ((and (list? name) (pair? name) (every symbol? name)) name)
+        (else (error who "name must be a symbol or non-empty list of symbols" name))))
+
+    (define (parse-dep-options clauses who)
+      (let loop ((xs clauses)
+                 (opts '()))
+        (if (null? xs)
+            (reverse opts)
+            (let ((clause (car xs)))
+              (call-with-values
+                (lambda () (parse-single clause who))
+                (lambda (k v)
+                  (loop (cdr xs) (cons (cons k v) opts))))))))
+
+    (define (opt-ref opts k)
+      (let ((p (assq k opts)))
+        (and p (cdr p))))
+
+    (define (parse-git-dep expr)
+      (define who "git dependency")
+      (ensure-list expr who)
+      (ensure-pair expr who)
+      (unless (eq? 'git (car expr))
+        (error who "expected (git ...)" expr))
+      (let* ((opts (parse-dep-options (cdr expr) who))
+             (name (opt-ref opts 'name))
+             (url (opt-ref opts 'url))
+             (rev (opt-ref opts 'rev))
+             (subpath (opt-ref opts 'subpath)))
+        (%git-dependency
+          (and name (normalize-name name who))
+          url
+          rev
+          subpath)))
+
+    (define (parse-oci-dep expr)
+      (define who "oci dependency")
+      (ensure-list expr who)
+      (ensure-pair expr who)
+      (unless (eq? 'oci (car expr))
+        (error who "expected (oci ...)" expr))
+      (let* ((opts (parse-dep-options (cdr expr) who))
+             (name (opt-ref opts 'name))
+             (url (opt-ref opts 'url))
+             (rev (opt-ref opts 'rev))
+             (subpath (opt-ref opts 'subpath)))
+        (%oci-dependency
+          (and name (normalize-name name who))
+          url
+          rev
+          subpath)))
+
+    (define (parse-path-dep expr)
+      (define who "path dependency")
+      (ensure-list expr who)
+      (ensure-pair expr who)
+      (unless (eq? 'path (car expr))
+        (error who "expected (path ...)" expr))
+      (let* ((opts (parse-dep-options (cdr expr) who))
+             (name (opt-ref opts 'name))
+             (path (opt-ref opts 'path))
+             (raw? (opt-ref opts 'raw?)))
+        (%path-dependency
+          (and name (normalize-name name who))
+          (canonicalize-path-string path)
+          (if (boolean? raw?) raw? #f))))
+
+    (define (parse-system-dep expr)
+      (define who "system dependency")
+      (ensure-list expr who)
+      (ensure-pair expr who)
+      (unless (eq? 'system (car expr))
+        (error who "expected (system ...)" expr))
+      (let ((names (cdr expr)))
+        (unless (every symbol? names)
+          (error who "system dependency names must be symbols" names))
+        (system-dependencies names)))
+
+    (define (parse-dependency expr)
+      (define who "dependency")
+      (ensure-list expr who)
+      (ensure-pair expr who)
+      (case (car expr)
+        ((git) (parse-git-dep expr))
+        ((oci) (parse-oci-dep expr))
+        ((path) (parse-path-dep expr))
+        ((system) (parse-system-dep expr))
+        (else (error who "unknown dependency type" (car expr) expr))))
+
+    (define (parse-dependencies-block expr who)
+      (ensure-list expr who)
+      (ensure-pair expr who)
+      (unless (eq? who (car expr))
+        (error "manifest" "unexpected block" expr))
+      (map parse-dependency (cdr expr)))
+
+    (define (parse-package-block expr)
+      (define who "package")
+      (ensure-list expr who)
+      (ensure-pair expr who)
+      (unless (eq? 'package (car expr))
+        (error who "expected (package ...)" expr))
+
+      (let loop ((clauses (cdr expr))
+                 (name #f)
+                 (libraries #f)
+                 (rnrs 'r7rs)
+                 (version #f)
+                 (authors '())
+                 (description "")
+                 (documentation "")
+                 (license "")
+                 (homepage "")
+                 (readme "")
+                 (repository ""))
+        (if (null? clauses)
+            (make-package
+              name libraries rnrs version authors description documentation license homepage readme repository)
+            (let ((clause (car clauses)))
+              (call-with-values
+                (lambda () (parse-key-value-clause clause who))
+                (lambda (k rest)
+                  (case k
+                    ((name)
+                     (unless (and (pair? rest) (null? (cdr rest)))
+                       (error who "(name ...) expects one value" clause))
+                     (loop (cdr clauses) (car rest) libraries rnrs version authors description documentation license homepage readme repository))
+                    ((libraries)
+                     (loop (cdr clauses) name rest rnrs version authors description documentation license homepage readme repository))
+                    ((rnrs)
+                     (unless (and (pair? rest) (null? (cdr rest)))
+                       (error who "(rnrs ...) expects one value" clause))
+                     (loop (cdr clauses) name libraries (car rest) version authors description documentation license homepage readme repository))
+                    ((version)
+                     (unless (and (pair? rest) (null? (cdr rest)))
+                       (error who "(version ...) expects one value" clause))
+                     (loop (cdr clauses) name libraries rnrs (car rest) authors description documentation license homepage readme repository))
+                    ((authors)
+                     (unless (and (pair? rest) (null? (cdr rest)))
+                       (error who "(authors ...) expects one value" clause))
+                     (loop (cdr clauses) name libraries rnrs version (car rest) description documentation license homepage readme repository))
+                    ((description)
+                     (unless (and (pair? rest) (null? (cdr rest)))
+                       (error who "(description ...) expects one value" clause))
+                     (loop (cdr clauses) name libraries rnrs version authors (car rest) documentation license homepage readme repository))
+                    ((documentation)
+                     (unless (and (pair? rest) (null? (cdr rest)))
+                       (error who "(documentation ...) expects one value" clause))
+                     (loop (cdr clauses) name libraries rnrs version authors description (car rest) license homepage readme repository))
+                    ((license)
+                     (unless (and (pair? rest) (null? (cdr rest)))
+                       (error who "(license ...) expects one value" clause))
+                     (loop (cdr clauses) name libraries rnrs version authors description documentation (car rest) homepage readme repository))
+                    ((homepage)
+                     (unless (and (pair? rest) (null? (cdr rest)))
+                       (error who "(homepage ...) expects one value" clause))
+                     (loop (cdr clauses) name libraries rnrs version authors description documentation license (car rest) readme repository))
+                    ((readme)
+                     (unless (and (pair? rest) (null? (cdr rest)))
+                       (error who "(readme ...) expects one value" clause))
+                     (loop (cdr clauses) name libraries rnrs version authors description documentation license homepage (car rest) repository))
+                    ((repository)
+                     (unless (and (pair? rest) (null? (cdr rest)))
+                       (error who "(repository ...) expects one value" clause))
+                     (loop (cdr clauses) name libraries rnrs version authors description documentation license homepage readme (car rest)))
+                    (else (error who "unknown package field" k clause)))))))))
+
+    (define (parse-manifest-exprs exprs)
+      (define pkg #f)
+      (define deps '())
+      (define dev-deps '())
+      (for-each
+        (lambda (expr)
+          (ensure-list expr "manifest")
+          (ensure-pair expr "manifest")
+          (case (car expr)
+            ((package) (set! pkg (parse-package-block expr)))
+            ((dependencies) (set! deps (parse-dependencies-block expr 'dependencies)))
+            ((dev-dependencies) (set! dev-deps (parse-dependencies-block expr 'dev-dependencies)))
+            (else (error "manifest" "unknown top-level form" (car expr) expr))))
+        exprs)
+      (make-manifest pkg deps dev-deps))
+
+    ;; Exported constructors (procedural; callers must pass data).
+    (define (package . clauses)
+      (parse-package-block (cons 'package clauses)))
+
+    (define (manifest . exprs)
+      (parse-manifest-exprs exprs))
 
 
     (define (make-package 
@@ -247,7 +425,8 @@
         (error "Package name must be a non-empty list of symbols" name))
 
       (unless (or (not libraries)
-                  (and (list? libraries) (every list? libraries)))
+             (and (list? libraries)
+               (every (lambda (x) (or (symbol? x) (list? x))) libraries)))
         (error "Libraries must be a list of library names" libraries))
 
       
@@ -286,379 +465,4 @@
         homepage
         readme
         repository))
-    
-
-    (define-syntax package 
-      (syntax-rules () 
-        ((_ expr ...)
-          (package-aux (
-            #f  ;; name 
-            #f  ;; libraries
-            'r7rs  ;; RnRs
-            #f  ;; version
-            '() ;; authors 
-            ""  ;; description
-            ""  ;; documentation link
-            ""  ;; license
-            ""  ;; homepage
-            ""  ;; readme
-            ""  ;; repository
-            ) expr ...))))
-
-    (define-syntax package-aux 
-      (syntax-rules 
-        (name libraries rnrs version authors description documentation license homepage readme repository)
-        
-        ((_ (%name %libraries %rnrs %version %authors %description %documentation %license %homepage %readme %repository))
-        
-          (make-package 
-            %name 
-            %libraries
-            %rnrs
-            %version
-            %authors
-            %description
-            %documentation
-            %license
-            %homepage
-            %readme
-            %repository))
-        ((_ (%name %libraries %rnrs %version %authors %description %documentation %license %homepage %readme %repository)
-          (name val) rest ...)
-          
-          (package-aux 
-            ('val 
-              %libraries
-              %rnrs
-              %version
-              %authors
-              %description
-              %documentation
-              %license
-              %homepage
-              %readme
-              %repository)
-              rest ...))
-        ((_ (%name %libraries %rnrs %version %authors %description %documentation %license %homepage %readme %repository)
-          (libraries val ...) rest ...)
-          ;; Accept: (libraries (foo) (foo bar) ...)
-          ;; We quote the whole list so library names are treated as data.
-          (package-aux
-            (%name
-             '(val ...)
-             %rnrs
-             %version
-             %authors
-             %description
-             %documentation
-             %license
-             %homepage
-             %readme
-             %repository)
-            rest ...))
-        ((_ (%name %libraries %rnrs %version %authors %description %documentation %license %homepage %readme %repository)
-          (rnrs val) rest ...)
-          
-          (package-aux 
-            (%name 
-              %libraries
-              'val
-              %version
-              %authors
-              %description
-              %documentation
-              %license
-              %homepage
-              %readme
-              %repository)
-              rest ...))
-
-        ((_ (%name %libraries %rnrs %version %authors %description %documentation %license %homepage %readme %repository)
-          (version val) rest ...)
-          
-          (package-aux 
-            (%name 
-              %libraries
-              %rnrs
-              'val
-              %authors
-              %description
-              %documentation
-              %license
-              %homepage
-              %readme
-              %repository)
-              rest ...))
-
-        ((_ (%name %libraries %rnrs %version %authors %description %documentation %license %homepage %readme %repository)
-          (authors val) rest ...)
-          
-          (package-aux 
-            (%name 
-              %libraries
-              %rnrs
-              %version
-              val
-              %description
-              %documentation
-              %license
-              %homepage
-              %readme
-              %repository)
-              rest ...))
-
-        ((_ (%name %libraries %rnrs %version %authors %description %documentation %license %homepage %readme %repository)
-          (description val) rest ...)
-          
-          (package-aux 
-            (%name 
-              %libraries
-              %rnrs
-              %version
-              %authors
-              val
-              %documentation
-              %license
-              %homepage
-              %readme
-              %repository)
-              rest ...))
-
-        ((_ (%name %libraries %rnrs %version %authors %description %documentation %license %homepage %readme %repository)
-          (documentation val) rest ...)
-          
-          (package-aux 
-            (%name 
-              %libraries
-              %rnrs
-              %version
-              %authors
-              %description
-              val
-              %license
-              %homepage
-              %readme
-              %repository)
-              rest ...))
-
-        ((_ (%name %libraries %rnrs %version %authors %description %documentation %license %homepage %readme %repository)
-          (license val) rest ...)
-          
-          (package-aux 
-            (%name 
-              %libraries
-              %rnrs
-              %version
-              %authors
-              %description
-              %documentation
-              val
-              %homepage
-              %readme
-              %repository)
-              rest ...))
-
-        ((_ (%name %libraries %rnrs %version %authors %description %documentation %license %homepage %readme %repository)
-          (homepage val) rest ...)
-          
-          (package-aux 
-            (%name 
-              %libraries
-              %rnrs
-              %version
-              %authors
-              %description
-              %documentation
-              %license
-              val
-              %readme
-              %repository)
-              rest ...))
-
-        ((_ (%name %libraries %rnrs %version %authors %description %documentation %license %homepage %readme %repository)
-          (readme val) rest ...)
-          
-          (package-aux 
-            (%name 
-              %libraries
-              %rnrs
-              %version
-              %authors
-              %description
-              %documentation
-              %license
-              %homepage
-              val
-              %repository)
-              rest ...))
-
-        ((_ (%name %libraries %rnrs %version %authors %description %documentation %license %homepage %readme %repository)
-          (repository val) rest ...)
-          
-          (package-aux 
-            (%name 
-              %libraries
-              %rnrs
-              %version
-              %authors
-              %description
-              %documentation
-              %license
-              %homepage
-              %readme
-              val)
-              rest ...))))
-          
-  
-    
-    (define-syntax dependencies-aux
-      (syntax-rules (git path oci system)
-        ((_ (parsed ...) )
-          (list parsed ...))
-        ((_ (parsed ...) (git expr ...) rest ...)
-          (dependencies-aux 
-            (parsed ... (git-dependency expr ...) )
-            rest ...))
-        ((_ (parsed ...) (path expr ...) rest ...)
-          (dependencies-aux 
-            (parsed ... (path-dependency expr ...) )
-            rest ...))
-        ((_ (parsed ...) (system expr ...) rest ...)
-          (dependencies-aux 
-            (parsed ... (system-dependency expr ...) )
-            rest ...))
-        ((_ (parsed ...) (oci expr ...) rest ...)
-          (dependencies-aux
-            (parsed ... (oci-dependency expr ...))
-            rest ...))))
-
-    (define-syntax oci-dependency
-      (syntax-rules ()
-        ((_ expr ...)
-          (oci-dependency-aux
-            (
-              #f  ;; name
-              #f  ;; url (registry/repo)
-              #f  ;; rev (tag)
-              #f  ;; subpath
-            ) expr ...))))
-
-    (define-syntax oci-dependency-aux
-      (syntax-rules (name url rev subpath)
-        ((_ (%name %url %target %subpath))
-          (%oci-dependency
-            %name
-            %url
-            %target
-            %subpath))
-        ((_ (%name %url %target %subpath) (name val) rest ...)
-          (oci-dependency-aux
-            ('val
-             %url
-             %target
-             %subpath)
-            rest ...))
-        ((_ (%name %url %target %subpath) (url val) rest ...)
-          (oci-dependency-aux
-            (%name
-             val
-             %target
-             %subpath)
-            rest ...))
-        ((_ (%name %url %target %subpath) (rev val) rest ...)
-          (oci-dependency-aux
-            (%name
-             %url
-             val
-             %subpath)
-            rest ...))
-        ((_ (%name %url %target %subpath) (subpath val) rest ...)
-          (oci-dependency-aux
-            (%name
-             %url
-             %target
-             val)
-            rest ...))))
-
-    (define-syntax path-dependency 
-      (syntax-rules () 
-        ((_ expr ...)
-          (path-dependency-aux 
-            (
-              #f  ;; name 
-              #f  ;; path 
-              #f  ;; raw?
-            ) expr ...))))
-    
-    (define-syntax path-dependency-aux
-      (syntax-rules (name path raw?)
-        ((_ (%name %path %raw?))
-          (%path-dependency 
-            %name 
-            (canonicalize-path-string %path) 
-            %raw?))
-        ((_ (%name %path %raw?) (name val) rest ...)
-          (path-dependency-aux 
-            ('val 
-             %path 
-             %raw?)
-            rest ...))
-        ((_ (%name %path %raw?) (path val) rest ...)
-          (path-dependency-aux 
-            (%name 
-             val  
-              %raw?)))))
-
-    (define-syntax git-dependency 
-      (syntax-rules () 
-        ((_ expr ...)
-          (git-dependency-aux 
-            (
-              #f  ;; name 
-              #f  ;; url 
-              #f  ;; rev
-              #f  ;; subpath
-            ) expr ...))))
-
-    (define-syntax git-dependency-aux
-      (syntax-rules (name url rev subpath)
-        ((_ (%name %url %target %subpath))
-          (%git-dependency 
-            %name 
-            %url 
-            %target
-            %subpath))
-        ((_ (%name %url %target %subpath) (name val) rest ...)
-          (git-dependency-aux 
-            ('val 
-             %url 
-             %target
-             %subpath)
-            rest ...))
-        ((_ (%name %url %target %subpath) (url val) rest ...)
-          (git-dependency-aux 
-            (%name 
-             val 
-             %target
-             %subpath)
-            rest ...))
-        ((_ (%name %url %target %subpath) (rev val) rest ...)
-          (git-dependency-aux 
-            (%name 
-             %url 
-             val
-             %subpath)
-            rest ...))
-        ((_ (%name %url %target %subpath) (subpath val) rest ...)
-          (git-dependency-aux 
-            (%name 
-             %url 
-             %target
-             val)
-            rest ...))))
-
-  (define-syntax system-dependency
-    (syntax-rules ()
-      ((_ name ...)
-        (system-dependencies '(name ...)))))
 ))
