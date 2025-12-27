@@ -18,7 +18,9 @@
     manifest-install-dependencies
     manifest-needs-recompile?
     manifest-update-dependencies
-    
+    run-root-build-script-if-needed!
+    run-dependency-build-script-if-needed!
+    ensure-locked!
     implementation->binary-name
     current-implementation
     ops->runargs

@@ -155,106 +155,267 @@
           (cons (cons name (list url target)) entries)))))
 
 
-(define (install-dependencies 
+;; --- build.scm support ------------------------------------------------------
+;; If a dependency contains a build.scm script (next to its spkg.scm), run it
+;; exactly once per installed dependency checksum.
+;;
+;; For git/oci deps the install path already includes the checksum, but we still
+;; keep an explicit marker file so repeated traversals in the same run (or
+;; future runs) don't re-run builds unnecessarily.
+;;
+;; For path deps we avoid writing into the user's source directory; build state
+;; is stored under the spkg dependency cache.
+
+(define (dependency-package-root dep)
+  (cond
+    ((git-dependency? dep)
+      (let ((root (git-dependency-install-dir dep)))
+        (if (git-dependency-subpath dep)
+            (string-append root "/" (git-dependency-subpath dep))
+            root)))
+    ((oci-dependency? dep)
+      (let ((root (oci-dependency-install-dir dep)))
+        (if (oci-dependency-subpath dep)
+            (string-append root "/" (oci-dependency-subpath dep))
+            root)))
+    ((path-dependency? dep)
+      (path-dependency-path dep))
+    (else #f)))
+
+(define (dependency-lock-entry dep lock)
+  (and lock
+       (cond
+         ((git-dependency? dep) (lockfile-ref lock (git-dependency-name dep)))
+         ((oci-dependency? dep) (lockfile-ref lock (oci-dependency-name dep)))
+         ((path-dependency? dep) (lockfile-ref lock (path-dependency-name dep)))
+         (else #f))))
+
+(define (dependency-current-checksum dep lock)
+  (let ((entry (dependency-lock-entry dep lock)))
+    (and entry (lock-entry-checksum entry))))
+
+(define (dependency-build-script-path dep)
+  (let ((root (dependency-package-root dep)))
+    (and root (string-append root "/build.scm"))))
+
+(define (dependency-build-marker-path dep checksum)
+  (define root (dependency-package-root dep))
+  (cond
+    ;; Safe to write into cache directories.
+    ((or (git-dependency? dep) (oci-dependency? dep))
+      (and root (string-append root "/.spkg-built-checksum")))
+    ;; Avoid writing into arbitrary local paths.
+    ((path-dependency? dep)
+      (let* ((name (name->path (path-dependency-name dep)))
+             (dir (string-append cache-dir "/build-state/path/" name)))
+        (ensure-directory dir)
+        (string-append dir "/built-checksum")))
+    (else #f)))
+
+(define (read-first-line-if-exists path)
+  (if (and path (file-exists? path))
+      (call-with-input-file path
+        (lambda (in)
+          (let ((line (read-line in)))
+            (if (eof-object? line) "" line))))
+      #f))
+
+(define (write-string-file! path s)
+  (when path
+    (call-with-output-file path
+      (lambda (out)
+        (display s out)
+        (newline out)))))
+
+(define (sha256-string s)
+  (capture-required-line
+    (string-append
+      "python3 -c "
+      (shell-quote
+        (string-append
+          "import hashlib,sys\n"
+          "sys.stdout.write(hashlib.sha256(sys.argv[1].encode('utf-8')).hexdigest())\n"))
+      " "
+      (shell-quote s))))
+
+(define (root-build-marker-path manifest)
+  ;; Root build state lives in the project dir, but is excluded from the root
+  ;; checksum so it doesn't cause perpetual rebuilds.
+  (define root (manifest-root-dir manifest))
+  (string-append root "/.spkg-built-checksum"))
+
+(define (manifest-build-script-path manifest)
+  (define mpath (manifest-path manifest))
+  (and mpath (string-append (dirname mpath) "/build.scm")))
+
+(define (run-root-build-script-if-needed! manifest runtime-ops tracker visited lock)
+  (define script (manifest-build-script-path manifest))
+  (define checksum (manifest-root-checksum manifest))
+  (cond
+    ((not (and script checksum)) #f)
+    ((not (file-exists? script)) #f)
+    (else
+      (let* ((marker (root-build-marker-path manifest))
+             (built (read-first-line-if-exists marker)))
+        (if (and built (string=? built checksum))
+            #f
+            (let* ((mpath (manifest-path manifest))
+                   (root (if mpath (dirname mpath) "."))
+                   (src-dir (string-append root "/" (manifest-source-path manifest)))
+                   ;; Dev-dependencies are available to build.scm only.
+                   (dev-ops (install-dev-dependencies manifest tracker visited lock))
+                   (build-ops (runops-merge runtime-ops dev-ops))
+                   (bin (implementation->binary-name (current-implementation)))
+                   (args (append (list bin)
+                                (ops->runargs build-ops src-dir #t manifest)
+                                (path->scriptarg script #t '())))
+                   (cmd (string-append
+                          "cd " (shell-quote root) " && "
+                          (string-join args " "))))
+              (info "Build" " Running build.scm for root package")
+              (system* cmd)
+              (write-string-file! marker checksum)
+              #t))))))
+
+(define (run-dependency-build-script-if-needed! dep dep-manifest dep-nested-ops tracker visited lock)
+  (define root (dependency-package-root dep))
+  (define script (dependency-build-script-path dep))
+  (define checksum (dependency-current-checksum dep lock))
+  (cond
+    ((not (and root script checksum dep-manifest))
+      #f)
+    ((not (file-exists? script))
+      #f)
+    (else
+      (let* ((marker (dependency-build-marker-path dep checksum))
+             (built (read-first-line-if-exists marker)))
+        (if (and built (string=? built checksum))
+            #f
+            (let* ((src-rel (manifest-source-path dep-manifest))
+                   (src-dir (string-append root "/" src-rel))
+                   ;; Dev-dependencies are available to build.scm only.
+                   (dev-ops (install-dev-dependencies dep-manifest tracker visited lock))
+                   (self-ops (runops '() (list src-dir) #f))
+                   (ops (runops-merge dep-nested-ops (runops-merge dev-ops self-ops)))
+                   (bin (implementation->binary-name (current-implementation)))
+                   (args (append (list bin)
+                                (ops->runargs ops "" #t dep-manifest)
+                                (path->scriptarg script #t '())))
+                   (cmd (string-append
+                          "cd " (shell-quote root) " && "
+                          (string-join (map shell-quote args) " "))))
+              (info "Build" " Running build.scm for ~a" (name->string (cond
+                                                                          ((git-dependency? dep) (git-dependency-name dep))
+                                                                          ((oci-dependency? dep) (oci-dependency-name dep))
+                                                                          ((path-dependency? dep) (path-dependency-name dep))
+                                                                          (else 'unknown))))
+              (system* cmd)
+              (write-string-file! marker checksum)
+              #t))))))
+
+
+(define (ensure-locked! dep lock direct?)
+  ;; A dependency is considered "direct" when installing the root manifest.
+  ;; For determinism, missing lock entries are allowed ONLY for direct deps.
+  ;; Transitive deps must already be recorded in the lockfile (typically via `spkg update`).
+  (when (and lock (not direct?))
+    (cond
+      ((git-dependency? dep)
+       (unless (lockfile-ref lock (git-dependency-name dep))
+         (raise-lockfile-error
+           "Missing lockfile entry for transitive dependency; run `spkg update`"
+           (git-dependency-name dep))))
+      ((oci-dependency? dep)
+       (unless (lockfile-ref lock (oci-dependency-name dep))
+         (raise-lockfile-error
+           "Missing lockfile entry for transitive dependency; run `spkg update`"
+           (oci-dependency-name dep))))
+      ((path-dependency? dep)
+       (unless (lockfile-ref lock (path-dependency-name dep))
+         (raise-lockfile-error
+           "Missing lockfile entry for transitive dependency; run `spkg update`"
+           (path-dependency-name dep))))
+      ((system-dependencies? dep)
+       (for-each
+         (lambda (name)
+           (unless (system-has-library? name)
+             (raise-lockfile-error
+               "Missing system dependency"
+               name)))
+         (system-dependencies-names dep)))
+      (else #t))))
+
+(define (install-one-dependency dep tracker visited lock direct?)
+  (ensure-locked! dep lock direct?)
+  (cond
+    ((git-dependency? dep)
+     (register-git-version! tracker dep)
+     (let* ((ops (git-dependency-install dep lock))
+            (manifest-path (git-dependency-manifest-path dep)))
+       (cond
+         ((file-exists? manifest-path)
+          (let* ((dep-manifest (read-manifest manifest-path))
+                 ;; Runtime deps never include dev-dependencies.
+                 (nested-deps (install-dependencies dep-manifest #f tracker visited lock))
+                 (_build (run-dependency-build-script-if-needed!
+                          dep dep-manifest nested-deps tracker visited lock)))
+            (runops-merge ops nested-deps)))
+         (else ops))))
+    ((oci-dependency? dep)
+     (let* ((ops (oci-dependency-install dep lock))
+            (manifest-path (oci-dependency-manifest-path dep)))
+       (cond
+         ((file-exists? manifest-path)
+          (let* ((dep-manifest (read-manifest manifest-path))
+                 (nested-deps (install-dependencies dep-manifest #f tracker visited lock))
+                 (_build (run-dependency-build-script-if-needed!
+                          dep dep-manifest nested-deps tracker visited lock)))
+            (runops-merge ops nested-deps)))
+         (else ops))))
+    ((path-dependency? dep)
+     (let ((ops (path-dependency-install dep lock)))
+       (if (path-dependency-raw? dep)
+           ops
+           (let ((manifest-path (path-dependency-manifest-path dep)))
+             (if (file-exists? manifest-path)
+                 (let* ((dep-manifest (read-manifest manifest-path))
+                        (nested-deps (install-dependencies dep-manifest #f tracker visited lock))
+                        (_build (run-dependency-build-script-if-needed!
+                                 dep dep-manifest nested-deps tracker visited lock)))
+                   (runops-merge ops nested-deps))
+                 ops)))))
+    ((system-dependencies? dep)
+     (for-each
+       (lambda (name)
+         (unless (system-has-library? name)
+           (raise-lockfile-error
+             "Missing system dependency"
+             name)))
+       (system-dependencies-names dep))
+     (runops '() '() #f))
+    (else ops)))
+
+(define (install-dependency-list deps tracker visited lock direct?)
+  (fold
+    (lambda (dep acc)
+      (runops-merge acc (install-one-dependency dep tracker visited lock direct?)))
+    (runops '() '() #f)
+    deps))
+
+(define (install-dependencies
   manifest
   dev-deps?
   tracker
   visited
   lock)
-  ;; A dependency is considered "direct" when installing the root manifest.
-  ;; For determinism, missing lock entries are allowed ONLY for direct deps.
-  ;; Transitive deps must already be recorded in the lockfile (typically via `spkg update`).
+  ;; NOTE: dev-dependencies are intentionally not part of runtime ops.
+  ;; They are installed and made available only when running build.scm.
   (define direct? (null? visited))
+  (install-dependency-list (manifest-dependencies manifest) tracker visited lock direct?))
 
-  (define (ensure-locked! dep)
-    (when (and lock (not direct?))
-      (cond
-        ((git-dependency? dep)
-         (unless (lockfile-ref lock (git-dependency-name dep))
-           (raise-lockfile-error
-             "Missing lockfile entry for transitive dependency; run `spkg update`"
-             (git-dependency-name dep))))
-        ((oci-dependency? dep)
-         (unless (lockfile-ref lock (oci-dependency-name dep))
-           (raise-lockfile-error
-             "Missing lockfile entry for transitive dependency; run `spkg update`"
-             (oci-dependency-name dep))))
-        ((path-dependency? dep)
-         (unless (lockfile-ref lock (path-dependency-name dep))
-           (raise-lockfile-error
-             "Missing lockfile entry for transitive dependency; run `spkg update`"
-             (path-dependency-name dep))))
-        ((system-dependencies? dep)
-          (for-each 
-            (lambda (name)
-              (unless (system-has-library? name)
-                (raise-lockfile-error
-                  "Missing system dependency"
-                  name)))
-            (system-dependencies-names dep)))
-        
-        (else #t))))
-
-  (define (install-one dep manifest tracker visited)
-    (ensure-locked! dep)
-    (cond 
-      ((git-dependency? dep)
-        (register-git-version! tracker dep)
-        (let* ((ops (git-dependency-install dep lock))
-               (manifest-path (git-dependency-manifest-path dep)))
-          (cond 
-            ((file-exists? manifest-path)
-    (let* ((dep-manifest (read-manifest manifest-path))
-      (nested-deps (install-dependencies dep-manifest dev-deps? tracker visited lock)))
-                (runops-merge ops nested-deps)))
-                ;(let loop ((rest nested-deps) (ops ops))
-                ;  (if (null? rest)
-                ;    ops 
-                ;    (loop (cdr rest) (runops-merge ops (car rest)))))))
-            (else 
-              ;; no manifset: raw dependency
-              ops))))
-      ((oci-dependency? dep)
-        (let* ((ops (oci-dependency-install dep lock))
-               (manifest-path (oci-dependency-manifest-path dep)))
-          (cond
-            ((file-exists? manifest-path)
-    (let* ((dep-manifest (read-manifest manifest-path))
-      (nested-deps (install-dependencies dep-manifest dev-deps? tracker visited lock)))
-                (runops-merge ops nested-deps)))
-            (else ops))))
-      ((path-dependency? dep)
-        (let ((ops (path-dependency-install dep lock)))
-          (if (path-dependency-raw? dep)
-              ops
-              (let ((manifest-path (path-dependency-manifest-path dep)))
-                (if (file-exists? manifest-path)
-          (let* ((dep-manifest (read-manifest manifest-path))
-            (nested-deps (install-dependencies dep-manifest dev-deps? tracker visited lock)))
-                      (runops-merge ops nested-deps))
-                    ops)))))
-      ((system-dependencies? dep)
-        (for-each 
-          (lambda (name)
-            (unless (system-has-library? name)
-              (raise-lockfile-error
-                "Missing system dependency"
-                name)))
-          (system-dependencies-names dep))
-        (runops '() '() #f))
-      (else ops)))
-  
-  (define deps
-      (if dev-deps?
-          (append (manifest-dependencies manifest)
-                  (manifest-dev-dependencies manifest))
-          (manifest-dependencies manifest)))
-
-  (fold 
-    (lambda (dep acc)
-      (runops-merge acc (install-one dep manifest tracker visited)))
-    (runops '() '() #f)
-    deps))
+(define (install-dev-dependencies manifest tracker visited lock)
+  (define direct? (null? visited))
+  (install-dependency-list (manifest-dev-dependencies manifest) tracker visited lock direct?))
 
 (define (manifest-root-dir manifest)
   (manifest-root-directory manifest))
@@ -266,7 +427,7 @@
       (string-append dir "/" default-lockfile-name)))
 
 (define (manifest-root-checksum manifest)
-  (filesystem-checksum (manifest-root-dir manifest) '("spkg.lock")))
+  (filesystem-checksum (manifest-root-dir manifest) '("spkg.lock" ".spkg-built-checksum")))
 
 (define (manifest-root-checksum-mismatch? manifest lock)
   (define stored (lockfile-root-checksum lock))
@@ -288,6 +449,9 @@
   (define tracker (make-version-tracker))
   (define root-mismatch? (manifest-root-checksum-mismatch? manifest lock))
   (define ops (install-dependencies manifest dev-deps? tracker '() lock))
+
+  ;; Run root build script (if present) after dependencies are installed.
+  (run-root-build-script-if-needed! manifest ops tracker '() lock)
 
   (define final-ops (if root-mismatch? (force-runops-recompile ops) ops))
   (when root-mismatch? 
